@@ -19,17 +19,17 @@ var installCmd = &cobra.Command{
 
 		appService, err := application.NewVersionAppService()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "初始化应用服务失败: %s", err)
+			PrintError(fmt.Sprintf("初始化应用服务失败: %s", err))
 			os.Exit(1)
 		}
 
-		fmt.Printf("正在安装Go %s...", version)
+		PrintInfo(fmt.Sprintf("正在安装Go %s...", version))
 		err = appService.Install(version)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "安装失败: %s", err)
+			PrintError(fmt.Sprintf("安装失败: %s", err))
 			os.Exit(1)
 		}
 
-		fmt.Printf("Go %s 安装成功", version)
+		PrintSuccess(fmt.Sprintf("Go %s 安装成功", version))
 	},
 }

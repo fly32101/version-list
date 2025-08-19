@@ -16,7 +16,7 @@ var rootCmd = &cobra.Command{
 // Execute 执行CLI命令
 func Execute() {
 	if err := rootCmd.Execute(); err != nil {
-		fmt.Fprintf(os.Stderr, "执行命令时出错: %s", err)
+		PrintError(fmt.Sprintf("执行命令时出错: %s", err))
 		os.Exit(1)
 	}
 }

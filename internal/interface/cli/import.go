@@ -19,17 +19,17 @@ var importCmd = &cobra.Command{
 
 		appService, err := application.NewVersionAppService()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "初始化应用服务失败: %s\n", err)
+			PrintError(fmt.Sprintf("初始化应用服务失败: %s", err))
 			os.Exit(1)
 		}
 
-		fmt.Printf("正在导入本地Go版本从路径: %s\n", path)
+		PrintInfo(fmt.Sprintf("正在导入本地Go版本从路径: %s", path))
 		version, err := appService.ImportLocal(path)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "导入失败: %s\n", err)
+			PrintError(fmt.Sprintf("导入失败: %s", err))
 			os.Exit(1)
 		}
 
-		fmt.Printf("成功导入Go版本: %s\n", version)
+		PrintSuccess(fmt.Sprintf("成功导入Go版本: %s", version))
 	},
 }
