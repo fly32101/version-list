@@ -1,8 +1,10 @@
 package application
 
 import (
+	"version-list/internal/domain/model"
 	"version-list/internal/domain/service"
 	"version-list/internal/infrastructure/persistence"
+	"version-list/internal/interface/ui"
 )
 
 // VersionAppService 版本管理应用服务
@@ -83,4 +85,15 @@ func (s *VersionAppService) Remove(version string) error {
 // ImportLocal 导入本地已安装的Go版本
 func (s *VersionAppService) ImportLocal(path string) (string, error) {
 	return s.versionService.ImportLocal(path)
+}
+
+// InstallOnline 在线安装指定版本的Go
+func (s *VersionAppService) InstallOnline(version string, options *model.InstallOptions, progressUI *ui.InstallProgressUI) (*model.InstallationResult, error) {
+	// 设置进度回调
+	if progressUI != nil {
+		// 这里可以添加进度回调逻辑
+		// 暂时直接调用领域服务
+	}
+
+	return s.versionService.InstallOnline(version, options)
 }

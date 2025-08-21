@@ -183,3 +183,165 @@ func (r *VersionRepositoryImpl) Remove(version string) error {
 
 	return r.saveVersions(newVersions)
 }
+
+// Update 更新Go版本信息
+func (r *VersionRepositoryImpl) Update(version *model.GoVersion) error {
+	versions, err := r.loadVersions()
+	if err != nil {
+		return err
+	}
+
+	found := false
+	now := time.Now()
+	for i, v := range versions {
+		if v.Version == version.Version {
+			version.UpdatedAt = now
+			versions[i] = version
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("未找到版本 %s", version.Version)
+	}
+
+	return r.saveVersions(versions)
+}
+
+// FindBySource 根据安装来源查找版本
+func (r *VersionRepositoryImpl) FindBySource(source model.InstallSource) ([]*model.GoVersion, error) {
+	versions, err := r.loadVersions()
+	if err != nil {
+		return nil, err
+	}
+
+	var result []*model.GoVersion
+	for _, v := range versions {
+		if v.Source == source {
+			result = append(result, v)
+		}
+	}
+
+	return result, nil
+}
+
+// FindByTag 根据标签查找版本
+func (r *VersionRepositoryImpl) FindByTag(tag string) ([]*model.GoVersion, error) {
+	versions, err := r.loadVersions()
+	if err != nil {
+		return nil, err
+	}
+
+	var result []*model.GoVersion
+	for _, v := range versions {
+		if v.HasTag(tag) {
+			result = append(result, v)
+		}
+	}
+
+	return result, nil
+}
+
+// UpdateLastUsed 更新最后使用时间
+func (r *VersionRepositoryImpl) UpdateLastUsed(version string) error {
+	versions, err := r.loadVersions()
+	if err != nil {
+		return err
+	}
+
+	found := false
+	for _, v := range versions {
+		if v.Version == version {
+			v.MarkAsUsed()
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("未找到版本 %s", version)
+	}
+
+	return r.saveVersions(versions)
+}
+
+// GetStatistics 获取统计信息
+func (r *VersionRepositoryImpl) GetStatistics() (*model.VersionStatistics, error) {
+	versions, err := r.loadVersions()
+	if err != nil {
+		return nil, err
+	}
+
+	stats := &model.VersionStatistics{
+		TotalVersions: len(versions),
+	}
+
+	var activeVersion string
+	var mostRecentlyUsed string
+	var oldestVersion string
+	var newestVersion string
+	var totalInstallTime time.Duration
+	var installCount int
+
+	for _, v := range versions {
+		// 统计安装来源
+		if v.Source == model.SourceOnline {
+			stats.OnlineVersions++
+		} else {
+			stats.LocalVersions++
+		}
+
+		// 记录激活版本
+		if v.IsActive {
+			activeVersion = v.Version
+		}
+
+		// 计算磁盘使用量
+		if v.ExtractInfo != nil {
+			stats.TotalDiskUsage += v.ExtractInfo.ExtractedSize
+		}
+
+		// 计算平均安装时间
+		if v.InstallDuration > 0 {
+			totalInstallTime += v.InstallDuration
+			installCount++
+		}
+
+		// 找最近使用的版本
+		if v.LastUsedAt != nil {
+			if mostRecentlyUsed == "" {
+				mostRecentlyUsed = v.Version
+			}
+		}
+
+		// 找最老和最新的版本（基于创建时间）
+		if oldestVersion == "" || v.CreatedAt.Before(findVersionByName(versions, oldestVersion).CreatedAt) {
+			oldestVersion = v.Version
+		}
+		if newestVersion == "" || v.CreatedAt.After(findVersionByName(versions, newestVersion).CreatedAt) {
+			newestVersion = v.Version
+		}
+	}
+
+	stats.ActiveVersion = activeVersion
+	stats.MostRecentlyUsed = mostRecentlyUsed
+	stats.OldestVersion = oldestVersion
+	stats.NewestVersion = newestVersion
+
+	if installCount > 0 {
+		stats.AverageInstallTime = totalInstallTime / time.Duration(installCount)
+	}
+
+	return stats, nil
+}
+
+// findVersionByName 辅助函数：根据版本名查找版本
+func findVersionByName(versions []*model.GoVersion, name string) *model.GoVersion {
+	for _, v := range versions {
+		if v.Version == name {
+			return v
+		}
+	}
+	return nil
+}

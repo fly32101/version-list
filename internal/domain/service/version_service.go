@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"time"
 	"version-list/internal/domain/model"
 	"version-list/internal/domain/repository"
 )
@@ -20,15 +21,38 @@ type VersionInfo struct {
 
 // VersionService 版本管理领域服务
 type VersionService struct {
-	versionRepo     repository.VersionRepository
-	environmentRepo repository.EnvironmentRepository
+	versionRepo      repository.VersionRepository
+	environmentRepo  repository.EnvironmentRepository
+	systemDetector   SystemDetector
+	downloadService  DownloadService
+	archiveExtractor ArchiveExtractor
 }
 
 // NewVersionService 创建版本服务实例
 func NewVersionService(versionRepo repository.VersionRepository, environmentRepo repository.EnvironmentRepository) *VersionService {
 	return &VersionService{
-		versionRepo:     versionRepo,
-		environmentRepo: environmentRepo,
+		versionRepo:      versionRepo,
+		environmentRepo:  environmentRepo,
+		systemDetector:   NewSystemDetector(),
+		downloadService:  NewDownloadService(nil),
+		archiveExtractor: NewArchiveExtractor(nil),
+	}
+}
+
+// NewVersionServiceWithDependencies 创建带有自定义依赖的版本服务实例
+func NewVersionServiceWithDependencies(
+	versionRepo repository.VersionRepository,
+	environmentRepo repository.EnvironmentRepository,
+	systemDetector SystemDetector,
+	downloadService DownloadService,
+	archiveExtractor ArchiveExtractor,
+) *VersionService {
+	return &VersionService{
+		versionRepo:      versionRepo,
+		environmentRepo:  environmentRepo,
+		systemDetector:   systemDetector,
+		downloadService:  downloadService,
+		archiveExtractor: archiveExtractor,
 	}
 }
 
@@ -229,4 +253,366 @@ func (s *VersionService) extractVersionFromPath(path string) (string, error) {
 	}
 
 	return matches[1], nil
+}
+
+// InstallOnline 在线安装指定版本的Go
+func (s *VersionService) InstallOnline(version string, options *model.InstallOptions) (*model.InstallationResult, error) {
+	// 检查版本是否已存在
+	_, err := s.versionRepo.FindByVersion(version)
+	if err == nil {
+		if options == nil || !options.Force {
+			return nil, fmt.Errorf("go版本 %s 已安装，使用 --force 选项强制重新安装", version)
+		}
+		// 强制重新安装，先删除现有版本
+		if err := s.Remove(version); err != nil {
+			return nil, fmt.Errorf("删除现有版本失败: %v", err)
+		}
+	}
+
+	// 创建安装上下文
+	context, err := s.createInstallationContext(version, options)
+	if err != nil {
+		return nil, fmt.Errorf("创建安装上下文失败: %v", err)
+	}
+
+	// 执行安装流程
+	result, err := s.executeInstallation(context)
+	if err != nil {
+		// 清理失败的安装
+		s.cleanupFailedInstallation(context)
+		return result, err
+	}
+
+	return result, nil
+}
+
+// createInstallationContext 创建安装上下文
+func (s *VersionService) createInstallationContext(version string, options *model.InstallOptions) (*model.InstallationContext, error) {
+	// 获取系统信息
+	systemInfo, err := s.systemDetector.GetSystemInfo(version)
+	if err != nil {
+		return nil, fmt.Errorf("获取系统信息失败: %v", err)
+	}
+
+	// 设置默认选项
+	if options == nil {
+		options = &model.InstallOptions{
+			Force:            false,
+			SkipVerification: false,
+			Timeout:          300, // 5分钟
+			MaxRetries:       3,
+		}
+	}
+
+	// 确定安装路径
+	baseDir := s.getBaseInstallDir()
+	if options.CustomPath != "" {
+		baseDir = options.CustomPath
+	}
+
+	versionDir := filepath.Join(baseDir, version)
+	tempDir := filepath.Join(os.TempDir(), "go-install-"+version)
+
+	paths := &model.InstallPaths{
+		BaseDir:     baseDir,
+		VersionDir:  versionDir,
+		TempDir:     tempDir,
+		ArchiveFile: filepath.Join(tempDir, systemInfo.Filename),
+	}
+
+	return &model.InstallationContext{
+		Version:    version,
+		SystemInfo: systemInfo,
+		Paths:      paths,
+		TempDir:    tempDir,
+		Options:    options,
+		StartTime:  time.Now(),
+		Status:     model.StatusPending,
+	}, nil
+}
+
+// executeInstallation 执行安装流程
+func (s *VersionService) executeInstallation(context *model.InstallationContext) (*model.InstallationResult, error) {
+	result := &model.InstallationResult{
+		Version: context.Version,
+		Path:    context.Paths.VersionDir,
+	}
+
+	// 1. 创建临时目录
+	if err := os.MkdirAll(context.TempDir, 0755); err != nil {
+		return s.createFailedResult(result, fmt.Errorf("创建临时目录失败: %v", err))
+	}
+
+	// 2. 下载阶段
+	context.Status = model.StatusDownloading
+	downloadInfo, err := s.downloadGoArchive(context)
+	if err != nil {
+		return s.createFailedResult(result, fmt.Errorf("下载失败: %v", err))
+	}
+	result.DownloadInfo = downloadInfo
+
+	// 3. 验证阶段（如果未跳过）
+	if !context.Options.SkipVerification {
+		if err := s.verifyDownload(context); err != nil {
+			return s.createFailedResult(result, fmt.Errorf("验证失败: %v", err))
+		}
+	}
+
+	// 4. 解压阶段
+	context.Status = model.StatusExtracting
+	extractInfo, err := s.extractGoArchive(context)
+	if err != nil {
+		return s.createFailedResult(result, fmt.Errorf("解压失败: %v", err))
+	}
+	result.ExtractInfo = extractInfo
+
+	// 5. 配置阶段
+	context.Status = model.StatusConfiguring
+	if err := s.configureInstallation(context); err != nil {
+		return s.createFailedResult(result, fmt.Errorf("配置失败: %v", err))
+	}
+
+	// 6. 保存版本信息
+	goVersion, err := s.createGoVersionRecord(context, downloadInfo, extractInfo)
+	if err != nil {
+		return s.createFailedResult(result, fmt.Errorf("保存版本记录失败: %v", err))
+	}
+
+	if err := s.versionRepo.Save(goVersion); err != nil {
+		return s.createFailedResult(result, fmt.Errorf("保存到仓库失败: %v", err))
+	}
+
+	// 7. 清理临时文件
+	s.cleanupTempFiles(context)
+
+	// 完成安装
+	context.Status = model.StatusCompleted
+	result.Success = true
+	result.Duration = time.Since(context.StartTime)
+
+	return result, nil
+}
+
+// downloadGoArchive 下载Go压缩包
+func (s *VersionService) downloadGoArchive(context *model.InstallationContext) (*model.DownloadInfo, error) {
+	startTime := time.Now()
+
+	// 获取文件大小
+	size, err := s.downloadService.GetFileSize(context.SystemInfo.URL)
+	if err != nil {
+		return nil, fmt.Errorf("获取文件大小失败: %v", err)
+	}
+
+	// 下载文件
+	err = s.downloadService.Download(
+		context.SystemInfo.URL,
+		context.Paths.ArchiveFile,
+		func(downloaded, total int64, speed float64) {
+			// 这里可以添加进度回调处理
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	duration := time.Since(startTime)
+	avgSpeed := float64(size) / duration.Seconds()
+
+	return &model.DownloadInfo{
+		URL:          context.SystemInfo.URL,
+		Filename:     context.SystemInfo.Filename,
+		Size:         size,
+		DownloadedAt: time.Now(),
+		Duration:     duration.Milliseconds(),
+		Speed:        avgSpeed,
+	}, nil
+}
+
+// verifyDownload 验证下载的文件
+func (s *VersionService) verifyDownload(context *model.InstallationContext) error {
+	// 验证文件是否存在
+	if _, err := os.Stat(context.Paths.ArchiveFile); os.IsNotExist(err) {
+		return fmt.Errorf("下载文件不存在: %s", context.Paths.ArchiveFile)
+	}
+
+	// 验证压缩包完整性
+	if err := s.archiveExtractor.ValidateArchive(context.Paths.ArchiveFile); err != nil {
+		return fmt.Errorf("压缩包验证失败: %v", err)
+	}
+
+	return nil
+}
+
+// extractGoArchive 解压Go压缩包
+func (s *VersionService) extractGoArchive(context *model.InstallationContext) (*model.ExtractInfo, error) {
+	startTime := time.Now()
+
+	// 获取压缩包信息
+	archiveInfo, err := s.archiveExtractor.GetArchiveInfo(context.Paths.ArchiveFile)
+	if err != nil {
+		return nil, fmt.Errorf("获取压缩包信息失败: %v", err)
+	}
+
+	// 创建版本目录
+	if err := os.MkdirAll(context.Paths.VersionDir, 0755); err != nil {
+		return nil, fmt.Errorf("创建版本目录失败: %v", err)
+	}
+
+	// 解压到临时目录
+	tempExtractDir := filepath.Join(context.TempDir, "extracted")
+	err = s.archiveExtractor.Extract(
+		context.Paths.ArchiveFile,
+		tempExtractDir,
+		func(progress ExtractionProgress) {
+			// 这里可以添加进度回调处理
+		},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	// 移动解压后的内容到最终目录
+	if err := s.moveExtractedContent(tempExtractDir, context.Paths.VersionDir, archiveInfo.RootDir); err != nil {
+		return nil, fmt.Errorf("移动解压内容失败: %v", err)
+	}
+
+	duration := time.Since(startTime)
+
+	return &model.ExtractInfo{
+		ArchiveSize:   archiveInfo.TotalSize,
+		ExtractedSize: archiveInfo.TotalSize, // 简化处理
+		FileCount:     archiveInfo.FileCount,
+		Duration:      duration,
+		RootDir:       archiveInfo.RootDir,
+	}, nil
+}
+
+// moveExtractedContent 移动解压后的内容
+func (s *VersionService) moveExtractedContent(srcDir, destDir, rootDir string) error {
+	// 如果有根目录，需要从根目录中移动内容
+	if rootDir != "" {
+		srcDir = filepath.Join(srcDir, rootDir)
+	}
+
+	// 检查源目录是否存在
+	if _, err := os.Stat(srcDir); os.IsNotExist(err) {
+		return fmt.Errorf("源目录不存在: %s", srcDir)
+	}
+
+	// 移动内容
+	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// 计算相对路径
+		relPath, err := filepath.Rel(srcDir, path)
+		if err != nil {
+			return err
+		}
+
+		if relPath == "." {
+			return nil
+		}
+
+		destPath := filepath.Join(destDir, relPath)
+
+		if info.IsDir() {
+			return os.MkdirAll(destPath, info.Mode())
+		}
+
+		// 确保目标目录存在
+		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			return err
+		}
+
+		// 移动文件
+		return os.Rename(path, destPath)
+	})
+}
+
+// configureInstallation 配置安装
+func (s *VersionService) configureInstallation(context *model.InstallationContext) error {
+	// 验证Go二进制文件
+	goExecPath := s.getGoExecutablePath(context.Paths.VersionDir)
+	if _, err := os.Stat(goExecPath); os.IsNotExist(err) {
+		return fmt.Errorf("go可执行文件不存在: %s", goExecPath)
+	}
+
+	// 验证Go版本
+	actualVersion, err := s.extractVersionFromPath(context.Paths.VersionDir)
+	if err != nil {
+		return fmt.Errorf("验证Go版本失败: %v", err)
+	}
+
+	if actualVersion != context.Version {
+		return fmt.Errorf("版本不匹配: 期望 %s, 实际 %s", context.Version, actualVersion)
+	}
+
+	return nil
+}
+
+// createGoVersionRecord 创建GoVersion记录
+func (s *VersionService) createGoVersionRecord(
+	context *model.InstallationContext,
+	downloadInfo *model.DownloadInfo,
+	extractInfo *model.ExtractInfo,
+) (*model.GoVersion, error) {
+	now := time.Now()
+
+	return &model.GoVersion{
+		Version:      context.Version,
+		Path:         context.Paths.VersionDir,
+		IsActive:     false,
+		Source:       model.SourceOnline,
+		DownloadInfo: downloadInfo,
+		ExtractInfo:  extractInfo,
+		ValidationInfo: &model.ValidationInfo{
+			ChecksumValid:   true, // 简化处理
+			ExecutableValid: true,
+			VersionValid:    true,
+		},
+		SystemInfo:      context.SystemInfo,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+		InstallDuration: time.Since(context.StartTime),
+		Tags:            []string{"online"},
+	}, nil
+}
+
+// getBaseInstallDir 获取基础安装目录
+func (s *VersionService) getBaseInstallDir() string {
+	homeDir, _ := os.UserHomeDir()
+	return filepath.Join(homeDir, ".go", "versions")
+}
+
+// getGoExecutablePath 获取Go可执行文件路径
+func (s *VersionService) getGoExecutablePath(installDir string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(installDir, "bin", "go.exe")
+	}
+	return filepath.Join(installDir, "bin", "go")
+}
+
+// createFailedResult 创建失败的安装结果
+func (s *VersionService) createFailedResult(result *model.InstallationResult, err error) (*model.InstallationResult, error) {
+	result.Success = false
+	result.Error = err.Error()
+	return result, err
+}
+
+// cleanupFailedInstallation 清理失败的安装
+func (s *VersionService) cleanupFailedInstallation(context *model.InstallationContext) {
+	// 删除临时目录
+	os.RemoveAll(context.TempDir)
+
+	// 删除部分安装的版本目录
+	if _, err := os.Stat(context.Paths.VersionDir); err == nil {
+		os.RemoveAll(context.Paths.VersionDir)
+	}
+}
+
+// cleanupTempFiles 清理临时文件
+func (s *VersionService) cleanupTempFiles(context *model.InstallationContext) {
+	os.RemoveAll(context.TempDir)
 }
