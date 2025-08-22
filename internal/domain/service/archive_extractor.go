@@ -83,6 +83,11 @@ func NewArchiveExtractor(options *ArchiveExtractorOptions) ArchiveExtractor {
 		options.ParallelWorkers = 1
 	}
 
+	// 确保缓冲区大小至少为1KB
+	if options.BufferSize < 1024 {
+		options.BufferSize = 64 * 1024 // 64KB 默认缓冲区
+	}
+
 	return &ArchiveExtractorImpl{
 		preservePermissions: options.PreservePermissions,
 		overwriteExisting:   options.OverwriteExisting,

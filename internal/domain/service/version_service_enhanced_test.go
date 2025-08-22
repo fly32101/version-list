@@ -123,6 +123,46 @@ func (m *MockVersionRepository) GetStatistics() (*model.VersionStatistics, error
 	return stats, nil
 }
 
+func (m *MockVersionRepository) FindWithFilter(filter *model.VersionFilter) ([]*model.GoVersion, error) {
+	// 简化实现，返回所有版本
+	return m.FindAll()
+}
+
+func (m *MockVersionRepository) FindWithSort(sorter *model.VersionSorter) ([]*model.GoVersion, error) {
+	// 简化实现，返回所有版本
+	return m.FindAll()
+}
+
+func (m *MockVersionRepository) FindWithFilterAndSort(filter *model.VersionFilter, sorter *model.VersionSorter) ([]*model.GoVersion, error) {
+	// 简化实现，返回所有版本
+	return m.FindAll()
+}
+
+func (m *MockVersionRepository) ExportVersions(exportPath string) (*model.VersionExport, error) {
+	// 简化实现
+	return &model.VersionExport{}, nil
+}
+
+func (m *MockVersionRepository) ImportVersions(importData *model.VersionImport) error {
+	// 简化实现
+	return nil
+}
+
+func (m *MockVersionRepository) BackupVersions(backupPath string) error {
+	// 简化实现
+	return nil
+}
+
+func (m *MockVersionRepository) RestoreVersions(backupPath string) error {
+	// 简化实现
+	return nil
+}
+
+func (m *MockVersionRepository) CleanupStaleVersions(days int) ([]string, error) {
+	// 简化实现
+	return []string{}, nil
+}
+
 // MockEnvironmentRepository 模拟环境仓库
 type MockEnvironmentRepository struct {
 	env *model.Environment

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -575,7 +576,11 @@ func (s *VersionService) extractGoArchiveWithProgress(context *model.Installatio
 	}
 
 	// 移动解压后的内容到最终目录
-	if err := s.moveExtractedContent(tempExtractDir, context.Paths.VersionDir, archiveInfo.RootDir); err != nil {
+	if progressUI != nil {
+		progressUI.SetProgress(80)
+		progressUI.SetMessage("移动文件到最终目录...")
+	}
+	if err := s.moveExtractedContentWithProgress(tempExtractDir, context.Paths.VersionDir, archiveInfo.RootDir, progressUI); err != nil {
 		return nil, fmt.Errorf("移动解压内容失败: %v", err)
 	}
 
@@ -590,8 +595,13 @@ func (s *VersionService) extractGoArchiveWithProgress(context *model.Installatio
 	}, nil
 }
 
-// moveExtractedContent 移动解压后的内容
+// moveExtractedContent 移动解压后的内容（优化版本）
 func (s *VersionService) moveExtractedContent(srcDir, destDir, rootDir string) error {
+	return s.moveExtractedContentWithProgress(srcDir, destDir, rootDir, nil)
+}
+
+// moveExtractedContentWithProgress 带进度显示的移动解压后的内容
+func (s *VersionService) moveExtractedContentWithProgress(srcDir, destDir, rootDir string, progressUI ProgressReporter) error {
 	// 如果有根目录，需要从根目录中移动内容
 	if rootDir != "" {
 		srcDir = filepath.Join(srcDir, rootDir)
@@ -602,57 +612,245 @@ func (s *VersionService) moveExtractedContent(srcDir, destDir, rootDir string) e
 		return fmt.Errorf("源目录不存在: %s", srcDir)
 	}
 
-	// 移动内容
-	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+	// 创建带超时的上下文（10分钟超时）
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancel()
+
+	// 优化策略：尝试直接移动整个目录，如果失败再逐个文件处理
+	if progressUI != nil {
+		progressUI.SetMessage("尝试快速目录移动...")
+	}
+	if err := s.tryDirectoryMove(srcDir, destDir); err == nil {
+		if progressUI != nil {
+			progressUI.SetProgress(85)
+			progressUI.SetMessage("目录移动完成")
+		}
+		return nil
+	}
+
+	// 如果直接移动失败，使用批量文件处理
+	if progressUI != nil {
+		progressUI.SetMessage("使用批量文件移动...")
+	}
+	return s.moveContentBatchWithTimeout(ctx, srcDir, destDir, progressUI)
+}
+
+// tryDirectoryMove 尝试直接移动整个目录
+func (s *VersionService) tryDirectoryMove(srcDir, destDir string) error {
+	// 检查目标目录是否为空
+	if entries, err := os.ReadDir(destDir); err == nil && len(entries) > 0 {
+		return fmt.Errorf("目标目录不为空")
+	}
+
+	// 尝试直接重命名目录（最快的方式）
+	parentDir := filepath.Dir(destDir)
+	if err := os.MkdirAll(parentDir, 0755); err != nil {
+		return err
+	}
+
+	// 如果目标目录已存在，先删除
+	if _, err := os.Stat(destDir); err == nil {
+		if err := os.RemoveAll(destDir); err != nil {
+			return err
+		}
+	}
+
+	return os.Rename(srcDir, destDir)
+}
+
+// moveContentBatch 批量移动文件内容（优化版本）
+func (s *VersionService) moveContentBatch(srcDir, destDir string) error {
+	return s.moveContentBatchWithProgress(srcDir, destDir, nil)
+}
+
+// moveContentBatchWithProgress 带进度显示的批量移动文件内容
+func (s *VersionService) moveContentBatchWithProgress(srcDir, destDir string, progressUI ProgressReporter) error {
+	// 使用并发处理来提高性能
+	const maxWorkers = 4
+	const batchSize = 100
+
+	// 收集所有需要处理的文件
+	var files []string
+	var dirs []string
+
+	err := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// 计算相对路径
-		relPath, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-
-		if relPath == "." {
+		if path == srcDir {
 			return nil
 		}
 
-		destPath := filepath.Join(destDir, relPath)
-
 		if info.IsDir() {
-			return os.MkdirAll(destPath, info.Mode())
+			dirs = append(dirs, path)
+		} else {
+			files = append(files, path)
 		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
 
-		// 确保目标目录存在
-		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+	// 先创建所有目录
+	if progressUI != nil {
+		progressUI.SetMessage(fmt.Sprintf("创建 %d 个目录...", len(dirs)))
+	}
+	for i, dir := range dirs {
+		relPath, err := filepath.Rel(srcDir, dir)
+		if err != nil {
+			return err
+		}
+		destPath := filepath.Join(destDir, relPath)
+		if err := os.MkdirAll(destPath, 0755); err != nil {
 			return err
 		}
 
-		// 尝试移动文件，如果失败则复制后删除
-		err = os.Rename(path, destPath)
-		if err != nil {
-			// 如果rename失败（通常是跨驱动器），则使用复制+删除
-			if err := s.copyFile(path, destPath); err != nil {
-				return fmt.Errorf("复制文件失败 %s -> %s: %v", path, destPath, err)
-			}
-			// 复制成功后删除源文件
-			if err := os.Remove(path); err != nil {
-				return fmt.Errorf("删除源文件失败 %s: %v", path, err)
-			}
+		if progressUI != nil && i%10 == 0 {
+			progress := 80.0 + (float64(i)/float64(len(dirs)))*5.0
+			progressUI.SetProgress(progress)
 		}
+	}
 
-		return nil
-	})
+	// 并发处理文件移动
+	if progressUI != nil {
+		progressUI.SetMessage(fmt.Sprintf("移动 %d 个文件...", len(files)))
+	}
+	return s.moveFilesConcurrentWithProgress(files, srcDir, destDir, maxWorkers, batchSize, progressUI)
 }
 
-// copyFile 复制文件
+// moveFilesConcurrent 并发移动文件
+func (s *VersionService) moveFilesConcurrent(files []string, srcDir, destDir string, maxWorkers, batchSize int) error {
+	return s.moveFilesConcurrentWithProgress(files, srcDir, destDir, maxWorkers, batchSize, nil)
+}
+
+// moveFilesConcurrentWithProgress 带进度显示的并发移动文件
+func (s *VersionService) moveFilesConcurrentWithProgress(files []string, srcDir, destDir string, maxWorkers, batchSize int, progressUI ProgressReporter) error {
+	if len(files) == 0 {
+		return nil
+	}
+
+	// 创建工作通道
+	fileChan := make(chan string, batchSize)
+	errorChan := make(chan error, maxWorkers)
+	progressChan := make(chan int, maxWorkers*10)
+	doneChan := make(chan bool, maxWorkers)
+
+	// 启动工作协程
+	for i := 0; i < maxWorkers; i++ {
+		go func() {
+			defer func() { doneChan <- true }()
+
+			processedCount := 0
+			for file := range fileChan {
+				if err := s.moveFile(file, srcDir, destDir); err != nil {
+					errorChan <- err
+					return
+				}
+				processedCount++
+				if processedCount%10 == 0 || processedCount == 1 {
+					progressChan <- processedCount
+					processedCount = 0 // 重置计数器
+				}
+			}
+			if processedCount > 0 {
+				progressChan <- processedCount
+			}
+		}()
+	}
+
+	// 发送文件到工作队列
+	go func() {
+		defer close(fileChan)
+		for _, file := range files {
+			fileChan <- file
+		}
+	}()
+
+	// 等待所有工作完成并更新进度
+	completedWorkers := 0
+	totalProcessed := 0
+	totalFiles := len(files)
+
+	for completedWorkers < maxWorkers {
+		select {
+		case err := <-errorChan:
+			return err
+		case processed := <-progressChan:
+			totalProcessed += processed
+			if progressUI != nil {
+				// 文件移动进度占 80-85%
+				progress := 80.0 + (float64(totalProcessed)/float64(totalFiles))*5.0
+				progressUI.SetProgress(progress)
+				progressUI.SetMessage(fmt.Sprintf("已移动 %d/%d 文件", totalProcessed, totalFiles))
+			}
+		case <-doneChan:
+			completedWorkers++
+		}
+	}
+
+	// 处理剩余的进度更新
+	for len(progressChan) > 0 {
+		processed := <-progressChan
+		totalProcessed += processed
+		if progressUI != nil {
+			progress := 80.0 + (float64(totalProcessed)/float64(totalFiles))*5.0
+			progressUI.SetProgress(progress)
+		}
+	}
+
+	return nil
+}
+
+// moveFile 移动单个文件
+func (s *VersionService) moveFile(filePath, srcDir, destDir string) error {
+	relPath, err := filepath.Rel(srcDir, filePath)
+	if err != nil {
+		return err
+	}
+
+	destPath := filepath.Join(destDir, relPath)
+
+	// 确保目标目录存在
+	if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+		return err
+	}
+
+	// 尝试移动文件，如果失败则复制后删除
+	err = os.Rename(filePath, destPath)
+	if err != nil {
+		// 如果rename失败（通常是跨驱动器），则使用复制+删除
+		if err := s.copyFileOptimized(filePath, destPath); err != nil {
+			return fmt.Errorf("复制文件失败 %s -> %s: %v", filePath, destPath, err)
+		}
+		// 复制成功后删除源文件
+		if err := os.Remove(filePath); err != nil {
+			return fmt.Errorf("删除源文件失败 %s: %v", filePath, err)
+		}
+	}
+
+	return nil
+}
+
+// copyFile 复制文件（保持向后兼容）
 func (s *VersionService) copyFile(src, dst string) error {
+	return s.copyFileOptimized(src, dst)
+}
+
+// copyFileOptimized 优化的文件复制函数
+func (s *VersionService) copyFileOptimized(src, dst string) error {
 	srcFile, err := os.Open(src)
 	if err != nil {
 		return err
 	}
 	defer srcFile.Close()
+
+	// 获取源文件信息
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
 
 	dstFile, err := os.Create(dst)
 	if err != nil {
@@ -660,18 +858,19 @@ func (s *VersionService) copyFile(src, dst string) error {
 	}
 	defer dstFile.Close()
 
-	// 复制文件内容
-	_, err = io.Copy(dstFile, srcFile)
+	// 使用更大的缓冲区提高复制性能
+	buffer := make([]byte, 1024*1024) // 1MB 缓冲区
+	_, err = io.CopyBuffer(dstFile, srcFile, buffer)
 	if err != nil {
+		return err
+	}
+
+	// 确保数据写入磁盘
+	if err := dstFile.Sync(); err != nil {
 		return err
 	}
 
 	// 复制文件权限
-	srcInfo, err := srcFile.Stat()
-	if err != nil {
-		return err
-	}
-
 	return os.Chmod(dst, srcInfo.Mode())
 }
 
@@ -759,4 +958,21 @@ func (s *VersionService) cleanupFailedInstallation(context *model.InstallationCo
 // cleanupTempFiles 清理临时文件
 func (s *VersionService) cleanupTempFiles(context *model.InstallationContext) {
 	os.RemoveAll(context.TempDir)
+}
+
+// moveContentBatchWithTimeout 带超时的批量移动文件内容
+func (s *VersionService) moveContentBatchWithTimeout(ctx context.Context, srcDir, destDir string, progressUI ProgressReporter) error {
+	// 使用通道来处理超时
+	resultChan := make(chan error, 1)
+
+	go func() {
+		resultChan <- s.moveContentBatchWithProgress(srcDir, destDir, progressUI)
+	}()
+
+	select {
+	case err := <-resultChan:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("文件移动操作超时: %v", ctx.Err())
+	}
 }
