@@ -9,17 +9,19 @@ import (
 
 // ProgressTracker 进度跟踪器
 type ProgressTracker struct {
-	mu           sync.RWMutex
-	currentStage string
-	stages       []string
-	stageIndex   int
-	progress     float64
-	message      string
-	startTime    time.Time
-	lastUpdate   time.Time
-	isActive     bool
-	showSpinner  bool
-	spinnerIndex int
+	mu             sync.RWMutex
+	currentStage   string
+	stages         []string
+	stageIndex     int
+	progress       float64
+	message        string
+	startTime      time.Time
+	lastUpdate     time.Time
+	lastRender     time.Time
+	isActive       bool
+	showSpinner    bool
+	spinnerIndex   int
+	updateInterval time.Duration // 更新间隔优化
 }
 
 // ProgressStage 进度阶段
@@ -41,10 +43,12 @@ type ProgressInfo struct {
 // NewProgressTracker 创建进度跟踪器
 func NewProgressTracker(stages []string) *ProgressTracker {
 	return &ProgressTracker{
-		stages:      stages,
-		startTime:   time.Now(),
-		lastUpdate:  time.Now(),
-		showSpinner: true,
+		stages:         stages,
+		startTime:      time.Now(),
+		lastUpdate:     time.Now(),
+		lastRender:     time.Now(),
+		showSpinner:    true,
+		updateInterval: 100 * time.Millisecond, // 优化更新频率
 	}
 }
 
@@ -114,15 +118,21 @@ func (p *ProgressTracker) SetMessage(message string) {
 	p.lastUpdate = time.Now()
 }
 
-// UpdateProgress 更新进度和消息
+// UpdateProgress 更新进度和消息（带频率限制）
 func (p *ProgressTracker) UpdateProgress(stage string, progress float64, message string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// 频率限制：避免过于频繁的更新
+	now := time.Now()
+	if now.Sub(p.lastUpdate) < p.updateInterval {
+		return
+	}
+
 	p.currentStage = stage
 	p.progress = progress
 	p.message = message
-	p.lastUpdate = time.Now()
+	p.lastUpdate = now
 
 	// 更新阶段索引
 	for i, s := range p.stages {
@@ -198,8 +208,18 @@ func (p *ProgressTracker) RenderSpinner() string {
 	return spinner
 }
 
-// RenderFullStatus 渲染完整状态
+// RenderFullStatus 渲染完整状态（带渲染频率优化）
 func (p *ProgressTracker) RenderFullStatus(width int) string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// 渲染频率限制
+	now := time.Now()
+	if now.Sub(p.lastRender) < p.updateInterval {
+		return "" // 返回空字符串表示不需要重新渲染
+	}
+	p.lastRender = now
+
 	info := p.GetProgress()
 
 	var parts []string
@@ -230,6 +250,13 @@ func (p *ProgressTracker) RenderFullStatus(width int) string {
 	parts = append(parts, timeInfo)
 
 	return strings.Join(parts, "\n")
+}
+
+// ShouldRender 检查是否需要重新渲染
+func (p *ProgressTracker) ShouldRender() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return time.Since(p.lastRender) >= p.updateInterval
 }
 
 // CalculateOverallProgress 计算总体进度

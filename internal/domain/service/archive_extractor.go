@@ -55,12 +55,16 @@ type ArchiveInfo struct {
 type ArchiveExtractorImpl struct {
 	preservePermissions bool
 	overwriteExisting   bool
+	parallelWorkers     int
+	bufferSize          int
 }
 
 // ArchiveExtractorOptions 解压选项
 type ArchiveExtractorOptions struct {
 	PreservePermissions bool // 保留文件权限
 	OverwriteExisting   bool // 覆盖已存在的文件
+	ParallelWorkers     int  // 并行工作协程数
+	BufferSize          int  // 缓冲区大小
 }
 
 // NewArchiveExtractor 创建压缩包解压服务实例
@@ -69,12 +73,21 @@ func NewArchiveExtractor(options *ArchiveExtractorOptions) ArchiveExtractor {
 		options = &ArchiveExtractorOptions{
 			PreservePermissions: true,
 			OverwriteExisting:   true,
+			ParallelWorkers:     runtime.NumCPU(), // 默认使用CPU核心数
+			BufferSize:          64 * 1024,        // 64KB 缓冲区
 		}
+	}
+
+	// 确保至少有一个工作协程
+	if options.ParallelWorkers < 1 {
+		options.ParallelWorkers = 1
 	}
 
 	return &ArchiveExtractorImpl{
 		preservePermissions: options.PreservePermissions,
 		overwriteExisting:   options.OverwriteExisting,
+		parallelWorkers:     options.ParallelWorkers,
+		bufferSize:          options.BufferSize,
 	}
 }
 
@@ -276,7 +289,7 @@ func (e *ArchiveExtractorImpl) getTarGzInfo(archivePath string) (*ArchiveInfo, e
 	return info, nil
 }
 
-// extractZip 解压ZIP文件
+// extractZip 解压ZIP文件（支持并行处理）
 func (e *ArchiveExtractorImpl) extractZip(archivePath, destPath string, progress ExtractionProgressCallback) error {
 	reader, err := zip.OpenReader(archivePath)
 	if err != nil {
@@ -285,8 +298,6 @@ func (e *ArchiveExtractorImpl) extractZip(archivePath, destPath string, progress
 	defer reader.Close()
 
 	totalFiles := len(reader.File)
-	var processedFiles int
-	var processedBytes int64
 	var totalBytes int64
 
 	// 计算总字节数
@@ -294,7 +305,21 @@ func (e *ArchiveExtractorImpl) extractZip(archivePath, destPath string, progress
 		totalBytes += int64(file.UncompressedSize64)
 	}
 
-	for _, file := range reader.File {
+	// 使用并行处理优化解压性能
+	if e.parallelWorkers > 1 && totalFiles > 10 {
+		return e.extractZipParallel(reader.File, destPath, totalFiles, totalBytes, progress)
+	}
+
+	// 串行处理（小文件或单线程模式）
+	return e.extractZipSequential(reader.File, destPath, totalFiles, totalBytes, progress)
+}
+
+// extractZipSequential 串行解压ZIP文件
+func (e *ArchiveExtractorImpl) extractZipSequential(files []*zip.File, destPath string, totalFiles int, totalBytes int64, progress ExtractionProgressCallback) error {
+	var processedFiles int
+	var processedBytes int64
+
+	for _, file := range files {
 		if err := e.extractZipFile(file, destPath); err != nil {
 			return fmt.Errorf("解压文件 %s 失败: %v", file.Name, err)
 		}
@@ -311,6 +336,73 @@ func (e *ArchiveExtractorImpl) extractZip(archivePath, destPath string, progress
 				ProcessedBytes: processedBytes,
 				TotalBytes:     totalBytes,
 			})
+		}
+	}
+
+	return nil
+}
+
+// extractZipParallel 并行解压ZIP文件
+func (e *ArchiveExtractorImpl) extractZipParallel(files []*zip.File, destPath string, totalFiles int, totalBytes int64, progress ExtractionProgressCallback) error {
+	// 创建工作队列
+	fileChan := make(chan *zip.File, len(files))
+	errorChan := make(chan error, e.parallelWorkers)
+
+	// 进度跟踪
+	type progressUpdate struct {
+		fileName string
+		size     int64
+	}
+	progressChan := make(chan progressUpdate, len(files))
+
+	// 启动工作协程
+	for i := 0; i < e.parallelWorkers; i++ {
+		go func() {
+			for file := range fileChan {
+				if err := e.extractZipFile(file, destPath); err != nil {
+					errorChan <- fmt.Errorf("解压文件 %s 失败: %v", file.Name, err)
+					return
+				}
+				progressChan <- progressUpdate{
+					fileName: file.Name,
+					size:     int64(file.UncompressedSize64),
+				}
+			}
+		}()
+	}
+
+	// 发送文件到工作队列
+	go func() {
+		defer close(fileChan)
+		for _, file := range files {
+			fileChan <- file
+		}
+	}()
+
+	// 收集进度和错误
+	var processedFiles int
+	var processedBytes int64
+	var lastFileName string
+
+	for processedFiles < totalFiles {
+		select {
+		case err := <-errorChan:
+			return err
+		case update := <-progressChan:
+			processedFiles++
+			processedBytes += update.size
+			lastFileName = update.fileName
+
+			if progress != nil {
+				progress(ExtractionProgress{
+					ProcessedFiles: processedFiles,
+					TotalFiles:     totalFiles,
+					CurrentFile:    lastFileName,
+					Percentage:     float64(processedFiles) / float64(totalFiles) * 100,
+					ProcessedBytes: processedBytes,
+					TotalBytes:     totalBytes,
+				})
+			}
 		}
 	}
 
@@ -358,8 +450,9 @@ func (e *ArchiveExtractorImpl) extractZipFile(file *zip.File, destPath string) e
 	}
 	defer destFile.Close()
 
-	// 复制文件内容
-	if _, err := io.Copy(destFile, srcFile); err != nil {
+	// 使用优化的缓冲区复制文件内容
+	buffer := make([]byte, e.bufferSize)
+	if _, err := io.CopyBuffer(destFile, srcFile, buffer); err != nil {
 		return fmt.Errorf("复制文件内容失败: %v", err)
 	}
 
@@ -468,8 +561,9 @@ func (e *ArchiveExtractorImpl) extractTarFile(tarReader *tar.Reader, header *tar
 		}
 		defer destFile.Close()
 
-		// 复制文件内容
-		if _, err := io.Copy(destFile, tarReader); err != nil {
+		// 使用优化的缓冲区复制文件内容
+		buffer := make([]byte, e.bufferSize)
+		if _, err := io.CopyBuffer(destFile, tarReader, buffer); err != nil {
 			return fmt.Errorf("复制文件内容失败: %v", err)
 		}
 

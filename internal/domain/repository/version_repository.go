@@ -28,6 +28,22 @@ type VersionRepository interface {
 	UpdateLastUsed(version string) error
 	// GetStatistics 获取统计信息
 	GetStatistics() (*model.VersionStatistics, error)
+	// FindWithFilter 根据过滤器查找版本
+	FindWithFilter(filter *model.VersionFilter) ([]*model.GoVersion, error)
+	// FindWithSort 根据排序器查找版本
+	FindWithSort(sorter *model.VersionSorter) ([]*model.GoVersion, error)
+	// FindWithFilterAndSort 根据过滤器和排序器查找版本
+	FindWithFilterAndSort(filter *model.VersionFilter, sorter *model.VersionSorter) ([]*model.GoVersion, error)
+	// ExportVersions 导出版本数据
+	ExportVersions(exportPath string) (*model.VersionExport, error)
+	// ImportVersions 导入版本数据
+	ImportVersions(importData *model.VersionImport) error
+	// BackupVersions 备份版本数据
+	BackupVersions(backupPath string) error
+	// RestoreVersions 恢复版本数据
+	RestoreVersions(backupPath string) error
+	// CleanupStaleVersions 清理过时版本
+	CleanupStaleVersions(days int) ([]string, error)
 }
 
 // EnvironmentRepository 定义环境变量仓库接口
