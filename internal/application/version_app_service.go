@@ -91,9 +91,11 @@ func (s *VersionAppService) ImportLocal(path string) (string, error) {
 func (s *VersionAppService) InstallOnline(version string, options *model.InstallOptions, progressUI *ui.InstallProgressUI) (*model.InstallationResult, error) {
 	// 设置进度回调
 	if progressUI != nil {
-		// 这里可以添加进度回调逻辑
-		// 暂时直接调用领域服务
+		// 开始系统检测阶段
+		progressUI.SetStage("检测系统")
+		progressUI.SetProgress(0)
+		progressUI.SetMessage("正在检测操作系统和CPU架构...")
 	}
 
-	return s.versionService.InstallOnline(version, options)
+	return s.versionService.InstallOnlineWithProgress(version, options, progressUI)
 }

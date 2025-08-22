@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,6 +18,14 @@ type VersionInfo struct {
 	Version  string // 版本号
 	Path     string // 安装路径
 	IsActive bool   // 是否为当前激活版本
+}
+
+// ProgressReporter 进度报告接口
+type ProgressReporter interface {
+	SetStage(stage string)
+	SetProgress(progress float64)
+	SetMessage(message string)
+	UpdateProgress(stage string, progress float64, message string)
 }
 
 // VersionService 版本管理领域服务
@@ -257,6 +266,11 @@ func (s *VersionService) extractVersionFromPath(path string) (string, error) {
 
 // InstallOnline 在线安装指定版本的Go
 func (s *VersionService) InstallOnline(version string, options *model.InstallOptions) (*model.InstallationResult, error) {
+	return s.InstallOnlineWithProgress(version, options, nil)
+}
+
+// InstallOnlineWithProgress 带进度显示的在线安装指定版本的Go
+func (s *VersionService) InstallOnlineWithProgress(version string, options *model.InstallOptions, progressUI ProgressReporter) (*model.InstallationResult, error) {
 	// 检查版本是否已存在
 	_, err := s.versionRepo.FindByVersion(version)
 	if err == nil {
@@ -264,19 +278,33 @@ func (s *VersionService) InstallOnline(version string, options *model.InstallOpt
 			return nil, fmt.Errorf("go版本 %s 已安装，使用 --force 选项强制重新安装", version)
 		}
 		// 强制重新安装，先删除现有版本
+		if progressUI != nil {
+			progressUI.SetMessage("删除现有版本...")
+		}
 		if err := s.Remove(version); err != nil {
 			return nil, fmt.Errorf("删除现有版本失败: %v", err)
 		}
 	}
 
 	// 创建安装上下文
+	if progressUI != nil {
+		progressUI.SetStage("检测系统")
+		progressUI.SetProgress(10)
+		progressUI.SetMessage("正在检测系统信息...")
+	}
+
 	context, err := s.createInstallationContext(version, options)
 	if err != nil {
 		return nil, fmt.Errorf("创建安装上下文失败: %v", err)
 	}
 
+	if progressUI != nil {
+		progressUI.SetProgress(20)
+		progressUI.SetMessage(fmt.Sprintf("检测到系统: %s/%s", context.SystemInfo.OS, context.SystemInfo.Arch))
+	}
+
 	// 执行安装流程
-	result, err := s.executeInstallation(context)
+	result, err := s.executeInstallationWithProgress(context, progressUI)
 	if err != nil {
 		// 清理失败的安装
 		s.cleanupFailedInstallation(context)
@@ -305,12 +333,18 @@ func (s *VersionService) createInstallationContext(version string, options *mode
 	}
 
 	// 确定安装路径
-	baseDir := s.getBaseInstallDir()
-	if options.CustomPath != "" {
-		baseDir = options.CustomPath
-	}
+	var versionDir string
+	var baseDir string
 
-	versionDir := filepath.Join(baseDir, version)
+	if options.CustomPath != "" {
+		// 如果指定了自定义路径，直接使用该路径作为版本目录
+		versionDir = options.CustomPath
+		baseDir = filepath.Dir(options.CustomPath)
+	} else {
+		// 使用默认路径结构
+		baseDir = s.getBaseInstallDir()
+		versionDir = filepath.Join(baseDir, version)
+	}
 	tempDir := filepath.Join(os.TempDir(), "go-install-"+version)
 
 	paths := &model.InstallPaths{
@@ -333,19 +367,34 @@ func (s *VersionService) createInstallationContext(version string, options *mode
 
 // executeInstallation 执行安装流程
 func (s *VersionService) executeInstallation(context *model.InstallationContext) (*model.InstallationResult, error) {
+	return s.executeInstallationWithProgress(context, nil)
+}
+
+// executeInstallationWithProgress 带进度显示的执行安装流程
+func (s *VersionService) executeInstallationWithProgress(context *model.InstallationContext, progressUI ProgressReporter) (*model.InstallationResult, error) {
 	result := &model.InstallationResult{
 		Version: context.Version,
 		Path:    context.Paths.VersionDir,
 	}
 
 	// 1. 创建临时目录
+	if progressUI != nil {
+		progressUI.SetProgress(25)
+		progressUI.SetMessage("创建临时目录...")
+	}
 	if err := os.MkdirAll(context.TempDir, 0755); err != nil {
 		return s.createFailedResult(result, fmt.Errorf("创建临时目录失败: %v", err))
 	}
 
 	// 2. 下载阶段
 	context.Status = model.StatusDownloading
-	downloadInfo, err := s.downloadGoArchive(context)
+	if progressUI != nil {
+		progressUI.SetStage("下载文件")
+		progressUI.SetProgress(30)
+		progressUI.SetMessage(fmt.Sprintf("正在下载 %s...", context.SystemInfo.Filename))
+	}
+
+	downloadInfo, err := s.downloadGoArchiveWithProgress(context, progressUI)
 	if err != nil {
 		return s.createFailedResult(result, fmt.Errorf("下载失败: %v", err))
 	}
@@ -353,6 +402,11 @@ func (s *VersionService) executeInstallation(context *model.InstallationContext)
 
 	// 3. 验证阶段（如果未跳过）
 	if !context.Options.SkipVerification {
+		if progressUI != nil {
+			progressUI.SetStage("验证文件")
+			progressUI.SetProgress(60)
+			progressUI.SetMessage("验证下载文件完整性...")
+		}
 		if err := s.verifyDownload(context); err != nil {
 			return s.createFailedResult(result, fmt.Errorf("验证失败: %v", err))
 		}
@@ -360,7 +414,13 @@ func (s *VersionService) executeInstallation(context *model.InstallationContext)
 
 	// 4. 解压阶段
 	context.Status = model.StatusExtracting
-	extractInfo, err := s.extractGoArchive(context)
+	if progressUI != nil {
+		progressUI.SetStage("解压文件")
+		progressUI.SetProgress(65)
+		progressUI.SetMessage("正在解压安装包...")
+	}
+
+	extractInfo, err := s.extractGoArchiveWithProgress(context, progressUI)
 	if err != nil {
 		return s.createFailedResult(result, fmt.Errorf("解压失败: %v", err))
 	}
@@ -368,11 +428,20 @@ func (s *VersionService) executeInstallation(context *model.InstallationContext)
 
 	// 5. 配置阶段
 	context.Status = model.StatusConfiguring
+	if progressUI != nil {
+		progressUI.SetStage("配置安装")
+		progressUI.SetProgress(85)
+		progressUI.SetMessage("配置Go环境...")
+	}
 	if err := s.configureInstallation(context); err != nil {
 		return s.createFailedResult(result, fmt.Errorf("配置失败: %v", err))
 	}
 
 	// 6. 保存版本信息
+	if progressUI != nil {
+		progressUI.SetProgress(90)
+		progressUI.SetMessage("保存版本信息...")
+	}
 	goVersion, err := s.createGoVersionRecord(context, downloadInfo, extractInfo)
 	if err != nil {
 		return s.createFailedResult(result, fmt.Errorf("保存版本记录失败: %v", err))
@@ -383,10 +452,19 @@ func (s *VersionService) executeInstallation(context *model.InstallationContext)
 	}
 
 	// 7. 清理临时文件
+	if progressUI != nil {
+		progressUI.SetStage("完成安装")
+		progressUI.SetProgress(95)
+		progressUI.SetMessage("清理临时文件...")
+	}
 	s.cleanupTempFiles(context)
 
 	// 完成安装
 	context.Status = model.StatusCompleted
+	if progressUI != nil {
+		progressUI.SetProgress(100)
+		progressUI.SetMessage("安装完成!")
+	}
 	result.Success = true
 	result.Duration = time.Since(context.StartTime)
 
@@ -395,6 +473,11 @@ func (s *VersionService) executeInstallation(context *model.InstallationContext)
 
 // downloadGoArchive 下载Go压缩包
 func (s *VersionService) downloadGoArchive(context *model.InstallationContext) (*model.DownloadInfo, error) {
+	return s.downloadGoArchiveWithProgress(context, nil)
+}
+
+// downloadGoArchiveWithProgress 带进度显示的下载Go压缩包
+func (s *VersionService) downloadGoArchiveWithProgress(context *model.InstallationContext, progressUI ProgressReporter) (*model.DownloadInfo, error) {
 	startTime := time.Now()
 
 	// 获取文件大小
@@ -408,7 +491,16 @@ func (s *VersionService) downloadGoArchive(context *model.InstallationContext) (
 		context.SystemInfo.URL,
 		context.Paths.ArchiveFile,
 		func(downloaded, total int64, speed float64) {
-			// 这里可以添加进度回调处理
+			if progressUI != nil {
+				// 计算下载进度 (30-60%)
+				downloadProgress := float64(downloaded)/float64(total)*30.0 + 30.0
+				progressUI.SetProgress(downloadProgress)
+
+				// 格式化速度和进度信息
+				speedStr := formatBytes(int64(speed)) + "/s"
+				progressStr := fmt.Sprintf("%.1f%%", float64(downloaded)/float64(total)*100)
+				progressUI.SetMessage(fmt.Sprintf("下载中... %s (%s)", progressStr, speedStr))
+			}
 		},
 	)
 	if err != nil {
@@ -445,6 +537,11 @@ func (s *VersionService) verifyDownload(context *model.InstallationContext) erro
 
 // extractGoArchive 解压Go压缩包
 func (s *VersionService) extractGoArchive(context *model.InstallationContext) (*model.ExtractInfo, error) {
+	return s.extractGoArchiveWithProgress(context, nil)
+}
+
+// extractGoArchiveWithProgress 带进度显示的解压Go压缩包
+func (s *VersionService) extractGoArchiveWithProgress(context *model.InstallationContext, progressUI ProgressReporter) (*model.ExtractInfo, error) {
 	startTime := time.Now()
 
 	// 获取压缩包信息
@@ -464,7 +561,13 @@ func (s *VersionService) extractGoArchive(context *model.InstallationContext) (*
 		context.Paths.ArchiveFile,
 		tempExtractDir,
 		func(progress ExtractionProgress) {
-			// 这里可以添加进度回调处理
+			if progressUI != nil {
+				// 计算解压进度 (65-85%)
+				extractProgress := progress.Percentage*0.20 + 65.0
+				progressUI.SetProgress(extractProgress)
+				progressUI.SetMessage(fmt.Sprintf("解压中... %.1f%% (%d/%d 文件)",
+					progress.Percentage, progress.ProcessedFiles, progress.TotalFiles))
+			}
 		},
 	)
 	if err != nil {
@@ -526,9 +629,50 @@ func (s *VersionService) moveExtractedContent(srcDir, destDir, rootDir string) e
 			return err
 		}
 
-		// 移动文件
-		return os.Rename(path, destPath)
+		// 尝试移动文件，如果失败则复制后删除
+		err = os.Rename(path, destPath)
+		if err != nil {
+			// 如果rename失败（通常是跨驱动器），则使用复制+删除
+			if err := s.copyFile(path, destPath); err != nil {
+				return fmt.Errorf("复制文件失败 %s -> %s: %v", path, destPath, err)
+			}
+			// 复制成功后删除源文件
+			if err := os.Remove(path); err != nil {
+				return fmt.Errorf("删除源文件失败 %s: %v", path, err)
+			}
+		}
+
+		return nil
 	})
+}
+
+// copyFile 复制文件
+func (s *VersionService) copyFile(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+
+	// 复制文件内容
+	_, err = io.Copy(dstFile, srcFile)
+	if err != nil {
+		return err
+	}
+
+	// 复制文件权限
+	srcInfo, err := srcFile.Stat()
+	if err != nil {
+		return err
+	}
+
+	return os.Chmod(dst, srcInfo.Mode())
 }
 
 // configureInstallation 配置安装
