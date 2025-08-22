@@ -1,6 +1,7 @@
 @echo off
 REM Go版本管理器环境变量设置脚本（Windows）
 
+chcp 936 >nul 2>&1  REM 切换到GBK编码（Windows默认中文编码）
 setlocal enabledelayedexpansion
 
 REM 设置环境变量
