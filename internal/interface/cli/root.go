@@ -29,4 +29,5 @@ func init() {
 	rootCmd.AddCommand(currentCmd)
 	rootCmd.AddCommand(removeCmd)
 	rootCmd.AddCommand(importCmd)
+	rootCmd.AddCommand(mirrorCmd)
 }

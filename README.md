@@ -61,6 +61,7 @@ go version go1.25.0 windows/amd64
 - 📋 **版本管理**：查看、移除和管理已安装的Go版本
 - 🌍 **环境管理**：自动管理Go相关的环境变量
 - 📦 **本地导入**：导入系统中已安装的Go版本
+- 🚀 **镜像源管理**：管理和优化Go下载镜像源，提高下载速度
 
 ### 增强特性
 
@@ -70,6 +71,8 @@ go version go1.25.0 windows/amd64
 - 🛡️ **可靠性**：自动重试、错误恢复和完整性验证
 - 🐳 **Docker支持**：提供容器化部署方案
 - 🔧 **灵活配置**：支持自定义安装路径和各种选项
+- 🌐 **多镜像源支持**：内置5个高质量镜像源，支持自定义镜像源
+- 🚀 **智能镜像选择**：自动测试并选择最快的镜像源
 
 ## 📦 安装
 
@@ -150,6 +153,13 @@ go-version list                     # 查看所有版本
 go-version use 1.25.0              # 切换版本
 go-version current                  # 查看当前版本
 go-version remove 1.24.0           # 移除版本
+
+# 镜像源管理
+go-version mirror list              # 查看所有镜像源
+go-version mirror test              # 测试所有镜像源速度
+go-version mirror fastest          # 选择最快镜像源
+go-version install 1.21.0 --mirror goproxy-cn    # 使用指定镜像安装
+go-version install 1.21.0 --auto-mirror          # 自动选择最快镜像
 
 # 高级选项
 go-version install 1.25.0 --path "C:\Go1.25.0"  # 自定义路径
@@ -403,6 +413,195 @@ go-version import "C:\Go"
 
 - 系统中已预装Go，但希望通过go-version工具进行管理
 - 已手动安装了某个Go版本，希望将其纳入go-version的管理范围
+
+注意：导入路径必须是Go的安装根目录，包含bin、src等子目录。
+
+### 镜像源管理
+
+`mirror`命令提供了完整的镜像源管理功能，帮助您优化Go版本下载速度。
+
+#### 查看所有可用的镜像源
+
+```bash
+# 基本列表
+go-version mirror list
+
+# 显示详细信息
+go-version mirror list --details
+```
+
+输出示例：
+
+```text
+可用的镜像源:
+
+  official     Go官方下载源 (global)
+               https://golang.org/dl/
+
+  goproxy-cn   七牛云Go代理镜像 (china)
+               https://goproxy.cn/golang/
+
+  aliyun       阿里云镜像源 (china)
+               https://mirrors.aliyun.com/golang/
+
+  tencent      腾讯云镜像源 (china)
+               https://mirrors.cloud.tencent.com/golang/
+
+  huawei       华为云镜像源 (china)
+               https://mirrors.huaweicloud.com/golang/
+```
+
+#### 测试镜像源速度和可用性
+
+```bash
+# 测试所有镜像源
+go-version mirror test
+
+# 测试指定镜像源
+go-version mirror test --name goproxy-cn
+
+# 设置超时时间（60秒）
+go-version mirror test --timeout 60
+
+# 强制测试（忽略缓存）
+go-version mirror test --force
+```
+
+测试输出示例：
+
+```text
+正在测试镜像源...
+
+测试 official (Go官方下载源)...
+  ✅ 可用 (响应时间: 245ms)
+
+测试 goproxy-cn (七牛云Go代理镜像)...
+  ✅ 可用 (响应时间: 156ms)
+
+测试 aliyun (阿里云镜像源)...
+  ✅ 可用 (响应时间: 189ms)
+
+测试结果总结:
+  1. goproxy-cn - 156ms
+  2. aliyun - 189ms
+  3. official - 245ms
+```
+
+#### 自动选择最快的镜像源
+
+```bash
+# 基本用法
+go-version mirror fastest
+
+# 显示详细测试过程
+go-version mirror fastest --details
+
+# 设置超时时间
+go-version mirror fastest --timeout 60
+```
+
+输出示例：
+
+```text
+正在测试所有镜像源以选择最快的...
+
+✅ 最快的镜像源: goproxy-cn
+描述: 七牛云Go代理镜像
+地区: china
+URL: https://goproxy.cn/golang/
+
+使用此镜像的示例:
+  go-version install 1.21.0 --mirror goproxy-cn
+```
+
+#### 验证镜像源可用性
+
+```bash
+# 验证指定镜像源
+go-version mirror validate --name official
+go-version mirror validate --name goproxy-cn
+```
+
+#### 添加自定义镜像源
+
+```bash
+# 添加公司内部镜像
+go-version mirror add \
+  --name mycompany \
+  --url "https://mirrors.mycompany.com/golang/" \
+  --description "公司内部镜像" \
+  --region "内网" \
+  --priority 1
+
+# 添加其他自定义镜像
+go-version mirror add \
+  --name university \
+  --url "https://mirrors.university.edu/golang/" \
+  --description "大学镜像源" \
+  --region "教育网" \
+  --priority 10
+```
+
+**参数说明：**
+
+| 参数 | 必需 | 描述 | 示例 |
+|------|------|------|------|
+| `--name` | 是 | 镜像源名称（唯一标识） | `mycompany` |
+| `--url` | 是 | 镜像源URL | `https://mirrors.example.com/golang/` |
+| `--description` | 是 | 镜像源描述 | `"公司内部镜像"` |
+| `--region` | 是 | 镜像源地区 | `"内网"` |
+| `--priority` | 否 | 镜像源优先级（数字越小优先级越高） | `1` |
+
+#### 移除自定义镜像源
+
+```bash
+# 移除指定的自定义镜像源
+go-version mirror remove --name mycompany
+go-version mirror remove --name university
+```
+
+**注意：**
+- 只能移除自定义添加的镜像源
+- 不能移除内置的默认镜像源（official、goproxy-cn、aliyun、tencent、huawei）
+
+#### 在安装时使用镜像源
+
+```bash
+# 使用指定镜像源安装
+go-version install 1.21.0 --mirror goproxy-cn
+go-version install 1.21.0 --mirror aliyun
+go-version install 1.21.0 --mirror mycompany
+
+# 自动选择最快镜像源安装
+go-version install 1.21.0 --auto-mirror
+
+# 组合使用其他选项
+go-version install 1.21.0 --mirror goproxy-cn --force --timeout 600
+```
+
+#### 镜像源配置管理
+
+自定义镜像源的配置保存在 `mirrors.json` 文件中：
+
+```bash
+# 查看配置文件位置
+go-version mirror list --config "path/to/mirrors.json"
+
+# 使用自定义配置文件
+go-version mirror add --config "path/to/mirrors.json" \
+  --name custom \
+  --url "https://example.com/golang/" \
+  --description "Custom mirror" \
+  --region "custom"
+```
+
+#### 镜像源特性
+
+- **智能缓存**：测试结果会被缓存，避免重复测试
+- **并发测试**：同时测试多个镜像源，提高效率
+- **错误重试**：自动重试失败的测试，提高可靠性
+- **多种测试方法**：支持HEAD和GET请求，兼容性更好
+- **灵活配置**：支持自定义配置文件路径
 
 注意：导入路径必须是Go的安装根目录，包含bin、src等子目录。
 

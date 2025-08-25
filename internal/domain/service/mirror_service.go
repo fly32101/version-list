@@ -16,6 +16,9 @@ type MirrorService interface {
 	SelectFastestMirror(ctx context.Context, mirrors []Mirror) (*Mirror, error)
 	ValidateMirror(ctx context.Context, mirror Mirror) error
 	GetMirrorByName(name string) (*Mirror, error)
+	AddCustomMirror(mirror Mirror) error
+	RemoveCustomMirror(name string) error
+	SaveConfig(configPath string) error
 }
 
 // Mirror 镜像配置
@@ -40,6 +43,7 @@ type mirrorServiceImpl struct {
 	httpClient *http.Client
 	mirrors    []Mirror
 	config     *MirrorConfig
+	configPath string
 	mu         sync.RWMutex
 }
 
@@ -67,8 +71,9 @@ func NewMirrorServiceWithConfig(configPath string) (MirrorService, error) {
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		mirrors: getDefaultMirrors(),
-		config:  config,
+		mirrors:    getDefaultMirrors(),
+		config:     config,
+		configPath: configPath,
 	}, nil
 }
 
@@ -229,7 +234,16 @@ func (s *mirrorServiceImpl) GetMirrorByName(name string) (*Mirror, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// 先搜索默认镜像
 	for _, mirror := range s.mirrors {
+		if mirror.Name == name {
+			return &mirror, nil
+		}
+	}
+
+	// 再搜索自定义镜像
+	customMirrors := s.config.GetCustomMirrors()
+	for _, mirror := range customMirrors {
 		if mirror.Name == name {
 			return &mirror, nil
 		}
@@ -277,4 +291,66 @@ func getDefaultMirrors() []Mirror {
 			Priority:    5,
 		},
 	}
+}
+
+// AddCustomMirror 添加自定义镜像
+func (s *mirrorServiceImpl) AddCustomMirror(mirror Mirror) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 检查名称是否已存在（包括默认镜像和自定义镜像）
+	for _, existing := range s.mirrors {
+		if existing.Name == mirror.Name {
+			return fmt.Errorf("镜像名称 '%s' 已存在（默认镜像）", mirror.Name)
+		}
+	}
+
+	customMirrors := s.config.GetCustomMirrors()
+	for _, existing := range customMirrors {
+		if existing.Name == mirror.Name {
+			return fmt.Errorf("镜像名称 '%s' 已存在（自定义镜像）", mirror.Name)
+		}
+	}
+
+	// 添加到配置中
+	s.config.AddCustomMirror(mirror)
+
+	return nil
+}
+
+// RemoveCustomMirror 移除自定义镜像
+func (s *mirrorServiceImpl) RemoveCustomMirror(name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 检查是否为默认镜像（不能删除）
+	for _, defaultMirror := range s.mirrors {
+		if defaultMirror.Name == name {
+			return fmt.Errorf("不能移除默认镜像源 '%s'", name)
+		}
+	}
+
+	// 从配置中移除
+	if !s.config.RemoveCustomMirror(name) {
+		return fmt.Errorf("未找到自定义镜像源 '%s'", name)
+	}
+
+	return nil
+}
+
+// SaveConfig 保存配置到文件
+func (s *mirrorServiceImpl) SaveConfig(configPath string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	path := configPath
+	if path == "" {
+		path = s.configPath
+	}
+
+	if path == "" {
+		return fmt.Errorf("未指定配置文件路径")
+	}
+
+	return s.config.SaveToFile(path)
 }
