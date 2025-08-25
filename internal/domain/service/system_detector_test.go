@@ -186,3 +186,211 @@ func TestSystemDetectorImpl_GetSystemInfo_InvalidVersion(t *testing.T) {
 		t.Errorf("SystemInfo.Version = %s, 期望 %s", systemInfo.Version, "1.21.0-rc1")
 	}
 }
+func TestSystemDetectorImpl_GetDownloadURLWithMirror(t *testing.T) {
+	detector := &SystemDetectorImpl{}
+
+	testCases := []struct {
+		version  string
+		os       string
+		arch     string
+		mirror   string
+		expected string
+	}{
+		{"1.21.0", "linux", "amd64", "official", "https://golang.org/dl/go1.21.0.linux-amd64.tar.gz"},
+		{"1.21.0", "linux", "amd64", "goproxy-cn", "https://goproxy.cn/golang/go1.21.0.linux-amd64.tar.gz"},
+		{"1.21.0", "linux", "amd64", "aliyun", "https://mirrors.aliyun.com/golang/go1.21.0.linux-amd64.tar.gz"},
+		{"1.21.0", "linux", "amd64", "tencent", "https://mirrors.cloud.tencent.com/golang/go1.21.0.linux-amd64.tar.gz"},
+		{"1.21.0", "linux", "amd64", "huawei", "https://mirrors.huaweicloud.com/golang/go1.21.0.linux-amd64.tar.gz"},
+		{"1.21.0", "windows", "amd64", "official", "https://golang.org/dl/go1.21.0.windows-amd64.zip"},
+		{"1.21.0", "darwin", "arm64", "goproxy-cn", "https://goproxy.cn/golang/go1.21.0.darwin-arm64.tar.gz"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.mirror+"_"+tc.os+"_"+tc.arch, func(t *testing.T) {
+			result := detector.GetDownloadURLWithMirror(tc.version, tc.os, tc.arch, tc.mirror)
+			if result != tc.expected {
+				t.Errorf("GetDownloadURLWithMirror(%s, %s, %s, %s) = %s, 期望 %s",
+					tc.version, tc.os, tc.arch, tc.mirror, result, tc.expected)
+			}
+		})
+	}
+}
+
+func TestSystemDetectorImpl_GetDownloadURLWithMirror_CustomURL(t *testing.T) {
+	detector := &SystemDetectorImpl{}
+
+	// 测试自定义镜像URL
+	customMirror := "https://custom.example.com/golang/"
+	result := detector.GetDownloadURLWithMirror("1.21.0", "linux", "amd64", customMirror)
+	expected := "https://custom.example.com/golang/go1.21.0.linux-amd64.tar.gz"
+
+	if result != expected {
+		t.Errorf("GetDownloadURLWithMirror() 自定义镜像 = %s, 期望 %s", result, expected)
+	}
+
+	// 测试不以/结尾的自定义镜像URL
+	customMirrorNoSlash := "https://custom.example.com/golang"
+	result2 := detector.GetDownloadURLWithMirror("1.21.0", "linux", "amd64", customMirrorNoSlash)
+	expected2 := "https://custom.example.com/golang/go1.21.0.linux-amd64.tar.gz"
+
+	if result2 != expected2 {
+		t.Errorf("GetDownloadURLWithMirror() 自定义镜像(无/) = %s, 期望 %s", result2, expected2)
+	}
+}
+
+func TestSystemDetectorImpl_GetDownloadURLWithMirror_EmptyMirror(t *testing.T) {
+	detector := &SystemDetectorImpl{}
+
+	// 测试空镜像名称，应该回退到官方源
+	result := detector.GetDownloadURLWithMirror("1.21.0", "linux", "amd64", "")
+	expected := detector.GetDownloadURL("1.21.0", "linux", "amd64")
+
+	if result != expected {
+		t.Errorf("GetDownloadURLWithMirror() 空镜像 = %s, 期望 %s", result, expected)
+	}
+}
+
+func TestSystemDetectorImpl_GetDownloadURLWithMirror_UnknownMirror(t *testing.T) {
+	detector := &SystemDetectorImpl{}
+
+	// 测试未知镜像名称，应该回退到官方源
+	result := detector.GetDownloadURLWithMirror("1.21.0", "linux", "amd64", "unknown-mirror")
+	expected := detector.GetDownloadURL("1.21.0", "linux", "amd64")
+
+	if result != expected {
+		t.Errorf("GetDownloadURLWithMirror() 未知镜像 = %s, 期望 %s", result, expected)
+	}
+}
+
+func TestSystemDetectorImpl_GetSystemInfoWithMirror(t *testing.T) {
+	detector := NewSystemDetector()
+
+	version := "1.21.0"
+	mirror := "goproxy-cn"
+
+	systemInfo, err := detector.GetSystemInfoWithMirror(version, mirror)
+	if err != nil {
+		t.Fatalf("GetSystemInfoWithMirror() 返回错误: %v", err)
+	}
+
+	// 验证基本信息
+	if systemInfo.Version != version {
+		t.Errorf("SystemInfo.Version = %s, 期望 %s", systemInfo.Version, version)
+	}
+
+	if systemInfo.Mirror != mirror {
+		t.Errorf("SystemInfo.Mirror = %s, 期望 %s", systemInfo.Mirror, mirror)
+	}
+
+	// 验证URL包含镜像信息
+	if !strings.Contains(systemInfo.URL, "goproxy.cn") {
+		t.Errorf("SystemInfo.URL 应该包含镜像信息: %s", systemInfo.URL)
+	}
+
+	// 验证其他字段不为空
+	if systemInfo.OS == "" {
+		t.Error("SystemInfo.OS 不能为空")
+	}
+
+	if systemInfo.Arch == "" {
+		t.Error("SystemInfo.Arch 不能为空")
+	}
+
+	if systemInfo.Filename == "" {
+		t.Error("SystemInfo.Filename 不能为空")
+	}
+}
+
+func TestSystemDetectorImpl_ValidateMirrorURL(t *testing.T) {
+	detector := &SystemDetectorImpl{}
+
+	testCases := []struct {
+		name          string
+		mirrorBaseURL string
+		version       string
+		os            string
+		arch          string
+		expectError   bool
+	}{
+		{
+			name:          "有效的官方镜像",
+			mirrorBaseURL: "official",
+			version:       "1.21.0",
+			os:            "linux",
+			arch:          "amd64",
+			expectError:   false,
+		},
+		{
+			name:          "有效的自定义镜像",
+			mirrorBaseURL: "https://custom.example.com/golang/",
+			version:       "1.21.0",
+			os:            "linux",
+			arch:          "amd64",
+			expectError:   false,
+		},
+		{
+			name:          "空镜像URL",
+			mirrorBaseURL: "",
+			version:       "1.21.0",
+			os:            "linux",
+			arch:          "amd64",
+			expectError:   true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := detector.ValidateMirrorURL(tc.mirrorBaseURL, tc.version, tc.os, tc.arch)
+
+			if tc.expectError && err == nil {
+				t.Error("期望返回错误，但没有错误")
+			}
+
+			if !tc.expectError && err != nil {
+				t.Errorf("不期望返回错误，但得到错误: %v", err)
+			}
+		})
+	}
+}
+
+func TestSystemDetectorImpl_GetSystemInfo_WithMirrorField(t *testing.T) {
+	detector := NewSystemDetector()
+
+	// 测试默认的GetSystemInfo方法是否设置了Mirror字段
+	systemInfo, err := detector.GetSystemInfo("1.21.0")
+	if err != nil {
+		t.Fatalf("GetSystemInfo() 返回错误: %v", err)
+	}
+
+	// 默认应该使用official镜像
+	if systemInfo.Mirror != "official" {
+		t.Errorf("SystemInfo.Mirror = %s, 期望 %s", systemInfo.Mirror, "official")
+	}
+}
+
+func TestContainsStringFunction(t *testing.T) {
+	testCases := []struct {
+		s        string
+		substr   string
+		expected bool
+	}{
+		{"hello world", "hello", true},
+		{"hello world", "world", true},
+		{"hello world", "lo wo", true},
+		{"hello world", "xyz", false},
+		{"", "", true},
+		{"hello", "", true},
+		{"", "hello", false},
+		{"go1.21.0.linux-amd64.tar.gz", "go1.21.0", true},
+		{"https://golang.org/dl/", "https://", true},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.s+"_contains_"+tc.substr, func(t *testing.T) {
+			result := containsString(tc.s, tc.substr)
+			if result != tc.expected {
+				t.Errorf("containsString(%q, %q) = %v, 期望 %v", tc.s, tc.substr, result, tc.expected)
+			}
+		})
+	}
+}

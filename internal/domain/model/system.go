@@ -11,6 +11,7 @@ type SystemInfo struct {
 	Version  string // Go版本号
 	Filename string // 下载文件名
 	URL      string // 下载URL
+	Mirror   string // 使用的镜像源名称
 }
 
 // InstallSource 安装来源
@@ -59,6 +60,8 @@ type InstallOptions struct {
 	SkipVerification bool   // 跳过文件验证
 	Timeout          int    // 超时时间（秒）
 	MaxRetries       int    // 最大重试次数
+	Mirror           string // 指定镜像源名称
+	AutoMirror       bool   // 自动选择最快镜像
 }
 
 // InstallStatus 安装状态

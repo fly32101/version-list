@@ -160,12 +160,14 @@ func TestVersionServiceWithCustomDependencies(t *testing.T) {
 	})
 
 	// 创建带有自定义依赖的版本服务
+	mirrorService := NewMirrorService()
 	service := NewVersionServiceWithDependencies(
 		versionRepo,
 		envRepo,
 		systemDetector,
 		downloadService,
 		archiveExtractor,
+		mirrorService,
 	)
 
 	// 测试创建安装上下文

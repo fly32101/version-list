@@ -36,6 +36,7 @@ type VersionService struct {
 	systemDetector   SystemDetector
 	downloadService  DownloadService
 	archiveExtractor ArchiveExtractor
+	mirrorService    MirrorService
 }
 
 // NewVersionService 创建版本服务实例
@@ -46,6 +47,7 @@ func NewVersionService(versionRepo repository.VersionRepository, environmentRepo
 		systemDetector:   NewSystemDetector(),
 		downloadService:  NewDownloadService(nil),
 		archiveExtractor: NewArchiveExtractor(nil),
+		mirrorService:    NewMirrorService(),
 	}
 }
 
@@ -56,6 +58,7 @@ func NewVersionServiceWithDependencies(
 	systemDetector SystemDetector,
 	downloadService DownloadService,
 	archiveExtractor ArchiveExtractor,
+	mirrorService MirrorService,
 ) *VersionService {
 	return &VersionService{
 		versionRepo:      versionRepo,
@@ -63,6 +66,7 @@ func NewVersionServiceWithDependencies(
 		systemDetector:   systemDetector,
 		downloadService:  downloadService,
 		archiveExtractor: archiveExtractor,
+		mirrorService:    mirrorService,
 	}
 }
 
@@ -317,12 +321,6 @@ func (s *VersionService) InstallOnlineWithProgress(version string, options *mode
 
 // createInstallationContext 创建安装上下文
 func (s *VersionService) createInstallationContext(version string, options *model.InstallOptions) (*model.InstallationContext, error) {
-	// 获取系统信息
-	systemInfo, err := s.systemDetector.GetSystemInfo(version)
-	if err != nil {
-		return nil, fmt.Errorf("获取系统信息失败: %v", err)
-	}
-
 	// 设置默认选项
 	if options == nil {
 		options = &model.InstallOptions{
@@ -330,7 +328,21 @@ func (s *VersionService) createInstallationContext(version string, options *mode
 			SkipVerification: false,
 			Timeout:          300, // 5分钟
 			MaxRetries:       3,
+			Mirror:           "official", // 默认使用官方源
+			AutoMirror:       false,
 		}
+	}
+
+	// 选择镜像
+	selectedMirror, err := s.selectMirror(options)
+	if err != nil {
+		return nil, fmt.Errorf("选择镜像失败: %v", err)
+	}
+
+	// 使用选定的镜像获取系统信息
+	systemInfo, err := s.systemDetector.GetSystemInfoWithMirror(version, selectedMirror)
+	if err != nil {
+		return nil, fmt.Errorf("获取系统信息失败: %v", err)
 	}
 
 	// 确定安装路径
@@ -975,4 +987,48 @@ func (s *VersionService) moveContentBatchWithTimeout(ctx context.Context, srcDir
 	case <-ctx.Done():
 		return fmt.Errorf("文件移动操作超时: %v", ctx.Err())
 	}
+}
+
+// selectMirror 选择镜像源
+func (s *VersionService) selectMirror(options *model.InstallOptions) (string, error) {
+	ctx := context.Background()
+
+	// 如果启用了自动镜像选择
+	if options.AutoMirror {
+		mirrors := s.mirrorService.GetAvailableMirrors()
+		if len(mirrors) == 0 {
+			return "official", nil // 回退到官方源
+		}
+
+		// 选择最快的镜像
+		fastest, err := s.mirrorService.SelectFastestMirror(ctx, mirrors)
+		if err != nil {
+			// 如果选择失败，回退到官方源
+			return "official", nil
+		}
+
+		return fastest.Name, nil
+	}
+
+	// 如果指定了镜像名称
+	if options.Mirror != "" {
+		// 验证镜像是否存在
+		_, err := s.mirrorService.GetMirrorByName(options.Mirror)
+		if err != nil {
+			return "", fmt.Errorf("指定的镜像 '%s' 不存在", options.Mirror)
+		}
+
+		// 验证镜像是否可用
+		mirror, _ := s.mirrorService.GetMirrorByName(options.Mirror)
+		if mirror != nil {
+			if err := s.mirrorService.ValidateMirror(ctx, *mirror); err != nil {
+				return "", fmt.Errorf("镜像 '%s' 不可用: %v", options.Mirror, err)
+			}
+		}
+
+		return options.Mirror, nil
+	}
+
+	// 默认使用官方源
+	return "official", nil
 }

@@ -86,6 +86,8 @@ type InstallOptions struct {
     InstallPath string // 自定义安装路径
     Force       bool   // 强制重新安装
     Timeout     int    // 下载超时时间（秒）
+    Mirror      string // 指定镜像源
+    AutoMirror  bool   // 自动选择最快镜像
 }
 ```
 
@@ -96,7 +98,7 @@ type InstallOptions struct {
 type SystemDetector interface {
     DetectOS() (string, error)           // 检测操作系统
     DetectArch() (string, error)         // 检测CPU架构
-    GetDownloadURL(version, os, arch string) string // 构建下载URL
+    GetDownloadURL(version, os, arch, mirror string) string // 构建下载URL
     GetExpectedFilename(version, os, arch string) string // 获取预期文件名
 }
 
@@ -107,6 +109,36 @@ type SystemInfo struct {
     Version  string // Go版本号
     Filename string // 下载文件名
     URL      string // 下载URL
+    Mirror   string // 使用的镜像源
+}
+```
+
+### 2.1. Mirror Management Service
+
+```go
+// MirrorService 镜像管理服务
+type MirrorService interface {
+    GetAvailableMirrors() []Mirror                    // 获取可用镜像列表
+    TestMirrorSpeed(mirror Mirror) (time.Duration, error) // 测试镜像速度
+    SelectFastestMirror(mirrors []Mirror) (Mirror, error) // 选择最快镜像
+    ValidateMirror(mirror Mirror) error               // 验证镜像可用性
+}
+
+// Mirror 镜像配置
+type Mirror struct {
+    Name        string // 镜像名称
+    BaseURL     string // 基础URL
+    Description string // 描述信息
+    Region      string // 地区信息
+    Priority    int    // 优先级
+}
+
+// MirrorTestResult 镜像测试结果
+type MirrorTestResult struct {
+    Mirror       Mirror        // 镜像信息
+    ResponseTime time.Duration // 响应时间
+    Available    bool          // 是否可用
+    Error        error         // 错误信息
 }
 ```
 
@@ -171,6 +203,7 @@ type VersionService struct {
     downloadService DownloadService
     extractor       ArchiveExtractor
     systemDetector  SystemDetector
+    mirrorService   MirrorService
 }
 
 // InstallOnline 在线安装Go版本
@@ -334,3 +367,55 @@ func TestDownloadService_Download(t *testing.T) {
 - **网络请求Mock**: 使用httpmock模拟Go官网API
 - **文件系统Stub**: 使用afero进行文件系统操作的测试
 - **进度回调Mock**: 验证进度报告的正确性
+
+## Mirror Configuration
+
+### 预设镜像列表
+
+```go
+// 预设的镜像配置
+var DefaultMirrors = []Mirror{
+    {
+        Name:        "official",
+        BaseURL:     "https://golang.org/dl/",
+        Description: "Go官方下载源",
+        Region:      "global",
+        Priority:    1,
+    },
+    {
+        Name:        "goproxy-cn",
+        BaseURL:     "https://goproxy.cn/golang/",
+        Description: "七牛云Go代理镜像",
+        Region:      "china",
+        Priority:    2,
+    },
+    {
+        Name:        "aliyun",
+        BaseURL:     "https://mirrors.aliyun.com/golang/",
+        Description: "阿里云镜像源",
+        Region:      "china",
+        Priority:    3,
+    },
+    {
+        Name:        "tencent",
+        BaseURL:     "https://mirrors.cloud.tencent.com/golang/",
+        Description: "腾讯云镜像源",
+        Region:      "china",
+        Priority:    4,
+    },
+    {
+        Name:        "huawei",
+        BaseURL:     "https://mirrors.huaweicloud.com/golang/",
+        Description: "华为云镜像源",
+        Region:      "china",
+        Priority:    5,
+    },
+}
+```
+
+### 镜像选择策略
+
+1. **手动指定**: 用户通过 `--mirror` 参数指定镜像名称
+2. **自动选择**: 用户通过 `--auto-mirror` 参数让系统自动选择最快镜像
+3. **默认行为**: 使用官方源，如果失败则尝试其他镜像
+4. **地区优化**: 根据用户地理位置优先选择相应地区的镜像

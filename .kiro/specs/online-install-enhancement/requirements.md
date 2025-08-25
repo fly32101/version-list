@@ -85,3 +85,27 @@
 2. WHEN 指定的目录不存在时 THEN 系统 SHALL 自动创建目录
 3. IF 指定的目录没有写权限 THEN 系统 SHALL 显示权限错误信息
 4. WHEN 未指定安装目录时 THEN 系统 SHALL 使用默认的版本管理目录
+
+### Requirement 8
+
+**User Story:** 作为开发者，我希望能够选择不同的下载镜像源，这样我就可以在网络环境不佳时获得更快的下载速度。
+
+#### Acceptance Criteria
+
+1. WHEN 用户使用 `--mirror` 参数时 THEN 系统 SHALL 使用指定的镜像源进行下载
+2. WHEN 系统支持多个预设镜像时 THEN 系统 SHALL 提供镜像列表供用户选择
+3. WHEN 未指定镜像时 THEN 系统 SHALL 使用官方Go网站作为默认下载源
+4. IF 指定的镜像不可用 THEN 系统 SHALL 自动回退到官方源或其他可用镜像
+5. WHEN 使用镜像下载时 THEN 系统 SHALL 显示当前使用的镜像源信息
+
+### Requirement 9
+
+**User Story:** 作为开发者，我希望系统能够自动选择最快的镜像源，这样我就不需要手动测试哪个镜像最快。
+
+#### Acceptance Criteria
+
+1. WHEN 用户使用 `--auto-mirror` 参数时 THEN 系统 SHALL 自动测试可用镜像的速度
+2. WHEN 进行镜像速度测试时 THEN 系统 SHALL 显示测试进度和结果
+3. WHEN 测试完成后 THEN 系统 SHALL 选择响应最快的镜像进行下载
+4. IF 所有镜像都不可用 THEN 系统 SHALL 使用官方源进行下载
+5. WHEN 自动选择镜像后 THEN 系统 SHALL 显示选中的镜像信息和测试结果
